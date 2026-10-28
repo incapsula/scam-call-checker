@@ -25,14 +25,21 @@ GEMMA_HINT = f"Is Ollama running, and has `{GEMMA}` been pulled?"
 def render(verdict: dict | None, voice: dict | None, error: str | None = None) -> str:
     parts = []
     if verdict:
-        parts.append(f"## {ICON.get(verdict['verdict'], '')} {verdict['verdict']} — risk {verdict['risk_score']}/100")
+        v = verdict.get("verdict", "?")
+        parts.append(f"## {ICON.get(v, '')} {v} — risk {verdict.get('risk_score', '?')}/100")
+        if verdict.get("escalation"):
+            parts.append(f"🛡️ **{verdict['escalation']}** (Gemma alone said {verdict.get('escalated_from')})")
+        if verdict.get("llm_error"):
+            parts.append(f"⚠️ Gemma unavailable, so this verdict is from the safety rules only. {GEMMA_HINT}\n\n"
+                         f"`{verdict['llm_error']}`")
     if voice:
-        line = (f"**Voice ({voice['detector']}):** {voice['fake_prob']:.0%} likely AI-generated "
-                f"(worst window {voice['max_fake_prob']:.0%}).")
-        parts.append(line + (f" {verdict['voice_note']}" if verdict else ""))
+        line = (f"**Voice ({voice.get('detector', '?')}):** {voice['fake_prob']:.0%} likely AI-generated "
+                f"(worst window {voice.get('max_fake_prob', voice['fake_prob']):.0%}).")
+        parts.append(line + (f" {verdict.get('voice_note', '')}" if verdict else ""))
     if verdict:
-        flags = "\n".join(f'- **"{f["quote"]}"** — {f["why"]}' for f in verdict["red_flags"]) or "- None found"
-        parts += [f"**Red flags:**\n{flags}", f"**What to do:** {verdict['advice']}"]
+        flags = "\n".join(f'- **"{f.get("quote", "")}"** — {f.get("why", "")}'
+                          for f in verdict.get("red_flags", [])) or "- None found"
+        parts += [f"**Red flags:**\n{flags}", f"**What to do:** {verdict.get('advice', '')}"]
     if error:
         parts.append(f"⚠️ `{error}`" + (f"\n\n{GEMMA_HINT}" if "Gemma" in error else ""))
     return "\n\n".join(parts)
@@ -84,7 +91,8 @@ def log_state(s):
     vs = s["voice_summary"]
     v = f"{vs['fake_prob']:.0%} fake" if vs else "-"
     verdict = s["verdict"]["verdict"] if s["verdict"] else "-"
-    print(f"[live] voice {v} | {len(s['transcript'].split())} words | verdict {verdict}"
+    raised = " (raised by safety rules)" if s["verdict"] and s["verdict"].get("escalation") else ""
+    print(f"[live] voice {v} | {len(s['transcript'].split())} words | verdict {verdict}{raised}"
           + (f" | error: {s['error']}" if s["error"] else ""), flush=True)
 
 
@@ -113,7 +121,10 @@ def start_live(choice):
         yield f"⚠️ Couldn't start listening: `{e}`", ""
         return
     while MONITOR is mon and mon.state["status"] != "stopped":
-        yield live_view()
+        try:
+            yield live_view()
+        except Exception as e:  # a display glitch shouldn't kill the live stream
+            yield f"⚠️ Display error: `{type(e).__name__}: {e}` (still listening)", mon.state["transcript"]
         time.sleep(1)
     yield live_view()
 

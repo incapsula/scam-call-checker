@@ -22,6 +22,12 @@ call audio ──► voice detector (AASIST) ───► fake-voice score ─�
 4. **Judge** (`scamcheck/analyse.py`): Gemma 4 via Ollama reads the transcript + voice score,
    following `skills/scam-call-analyst/SKILL.md` (Agent Skills format), and returns JSON:
    verdict, risk score, the exact phrases that are red flags, and what to do.
+5. **Safety rules** (`scamcheck/rules.py`): a deterministic check Gemma can't override. It spots
+   known scam lines (rate-reduction offers, "Card Member Services", safe accounts, one-time codes,
+   gift cards, "press 1", read-out callback numbers…) and only ever raises the verdict:
+   an AI voice is never "safe", and an AI voice plus any offer, money or pressure is a SCAM.
+   It also replaces unsafe advice, and gives a verdict on its own if Gemma is unavailable.
+   Accents, grammar and nationality are deliberately not used as signals.
 
 ## Setup
 
@@ -107,6 +113,8 @@ The evaluation prints accuracy and EER (lower is better): use those numbers in t
 python -m scamcheck.voice samples/*.wav                    # voice scores per clip
 python -m scamcheck.transcribe samples/real_scam.wav
 python -m scamcheck.analyse "This is HMRC, you will be arrested unless you pay in gift cards"
+python -m scamcheck.analyse --voice 0.97 "Call Card Member Services at 1-800-694-0048 to lower your interest rate"
+python -m scamcheck.rules --voice 0.97 "any transcript"     # safety rules only, no Gemma needed
 ```
 
 ## Who owns what

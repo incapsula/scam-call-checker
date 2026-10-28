@@ -215,9 +215,13 @@ def render_text(state: dict) -> str:
                      f"worst {vs['max_fake_prob']:.0%}")
     r = state["verdict"]
     if r:
-        lines += ["", f"{COLOUR.get(r['verdict'], '')} {r['verdict']}  risk {r['risk_score']}/100 {RESET}"]
-        lines += [f'  ! "{f["quote"]}" - {f["why"]}' for f in r["red_flags"]]
-        lines += [f"  What to do: {r['advice']}"]
+        lines += ["", f"{COLOUR.get(r['verdict'], '')} {r['verdict']}  risk {r.get('risk_score', '?')}/100 {RESET}"]
+        if r.get("escalation"):
+            lines.append(f"  {r['escalation']} (Gemma alone said {r.get('escalated_from')})")
+        if r.get("llm_error"):
+            lines.append(f"  [Gemma unavailable, safety rules only: {r['llm_error']}]")
+        lines += [f'  ! "{f.get("quote", "")}" - {f.get("why", "")}' for f in r.get("red_flags", [])]
+        lines += [f"  What to do: {r.get('advice', '')}"]
     elif state["transcript"]:
         lines.append("\nWaiting for Gemma's first verdict...")
     if state["error"]:
