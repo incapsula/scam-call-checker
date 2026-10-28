@@ -53,33 +53,61 @@ def input_devices() -> list[tuple[int, str]]:
     return out
 
 
+def loopback_devices() -> list[tuple[int, str]]:
+    """Windows: every output device whose sound can be captured (speakers, headsets...).
+    Needs PyAudioWPatch; returns [] elsewhere."""
+    try:
+        import pyaudiowpatch as pyaudio
+    except ImportError:
+        return []
+    p = pyaudio.PyAudio()
+    try:
+        return [(int(d["index"]), str(d["name"])) for d in p.get_loopback_device_info_generator()]
+    except Exception:
+        return []
+    finally:
+        p.terminate()
+
+
+def parse_device(spec):
+    """'3' -> 3 (mic index), 'system' -> default output, 'system:12' -> output loopback #12."""
+    if spec is None or isinstance(spec, int):
+        return spec
+    spec = str(spec).strip()
+    return int(spec) if spec.isdigit() else spec
+
+
 class SystemAudioCapture:
     """Records what Windows is playing (Discord, YouTube, Phone Link calls) via WASAPI loopback.
 
     Needs: pip install PyAudioWPatch   (Windows only)
-    Captures the *default output device*, so set the call app's output to "Default".
-    Note: Windows sends no audio here while nothing is playing.
+    index=None captures the *default output device*; pass a loopback device index (see
+    loopback_devices()) to capture a specific speaker/headset, e.g. the one Discord uses.
+    Note: Windows sends no audio here while nothing is playing on that device.
     """
 
-    def __init__(self, push):
+    def __init__(self, push, index: int | None = None):
         try:
             import pyaudiowpatch as pyaudio
         except ImportError as e:
             raise RuntimeError("System audio needs: pip install PyAudioWPatch (Windows only)") from e
 
         self.p = pyaudio.PyAudio()
-        try:
-            dev = self.p.get_default_wasapi_loopback()
-        except Exception:
-            wasapi = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
-            speakers = self.p.get_device_info_by_index(wasapi["defaultOutputDevice"])
-            dev = next(
-                (d for d in self.p.get_loopback_device_info_generator() if speakers["name"] in d["name"]),
-                None,
-            )
-            if dev is None:
-                self.p.terminate()
-                raise RuntimeError(f"No loopback device found for {speakers['name']}")
+        if index is not None:
+            dev = self.p.get_device_info_by_index(index)
+        else:
+            try:
+                dev = self.p.get_default_wasapi_loopback()
+            except Exception:
+                wasapi = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
+                speakers = self.p.get_device_info_by_index(wasapi["defaultOutputDevice"])
+                dev = next(
+                    (d for d in self.p.get_loopback_device_info_generator() if speakers["name"] in d["name"]),
+                    None,
+                )
+                if dev is None:
+                    self.p.terminate()
+                    raise RuntimeError(f"No loopback device found for {speakers['name']}")
 
         self.name = dev["name"]
         self.rate = int(dev["defaultSampleRate"])
@@ -120,14 +148,15 @@ class LiveMonitor:
     @staticmethod
     def _fresh_state() -> dict:
         return {"status": "idle", "transcript": "", "voice": [], "voice_summary": None,
-                "verdict": None, "error": None, "started": None}
+                "verdict": None, "error": None, "started": None, "level": None, "chunks": 0}
 
     # --- audio capture -------------------------------------------------------------------
     def start(self):
         self.state = self._fresh_state()
         self._stop.clear()
-        if self.device == SYSTEM_AUDIO:
-            self._stream = SystemAudioCapture(self._q.put)
+        if isinstance(self.device, str) and self.device.startswith(SYSTEM_AUDIO):
+            idx = self.device.split(":", 1)[1] if ":" in self.device else ""
+            self._stream = SystemAudioCapture(self._q.put, int(idx) if idx.isdigit() else None)
             self.rate = self._stream.rate
             name = f"system audio ({self._stream.name})"
         else:
@@ -176,7 +205,10 @@ class LiveMonitor:
             chunk, buf = buf[:need], buf[need:]
             audio = chunk if self.rate == SR else librosa.resample(chunk, orig_sr=self.rate, target_sr=SR)
             audio = np.asarray(audio, dtype=np.float32)
-            if float(np.sqrt(np.mean(audio ** 2))) < SILENCE_RMS:
+            level = float(np.sqrt(np.mean(audio ** 2)))
+            self.state["level"], self.state["chunks"] = level, self.state["chunks"] + 1
+            if level < SILENCE_RMS:
+                self._emit()  # still report the level, so "nothing is reaching us" is visible
                 continue  # silence: nothing to score or transcribe
             tail = np.concatenate([tail, audio])[-int(VOICE_CONTEXT_S * SR):]
 
@@ -259,8 +291,21 @@ COLOUR = {"SCAM": "\033[1;41;97m", "SUSPICIOUS": "\033[1;43;30m", "LIKELY SAFE":
 RESET = "\033[0m"
 
 
+def level_line(state: dict) -> str:
+    """Input level meter, or a hint when no sound is reaching the app at all."""
+    started = state.get("started")
+    if not state.get("chunks"):
+        if started and time.time() - started > CHUNK_S + 2:
+            return "No audio received yet: is the call/video actually playing through this device?"
+        return ""
+    lvl = state.get("level") or 0.0
+    bars = min(10, int(lvl / 0.01))  # ~0.1 RMS = full scale
+    note = "  (silent: nothing loud enough is reaching this input)" if lvl < SILENCE_RMS else ""
+    return f"Input level [{'#' * bars}{'-' * (10 - bars)}] {lvl:.3f}{note}"
+
+
 def render_text(state: dict) -> str:
-    lines = ["SCAM CALL CHECKER  (Ctrl+C to stop)", state["status"], ""]
+    lines = ["SCAM CALL CHECKER  (Ctrl+C to stop)", state["status"], level_line(state), ""]
     vs = state["voice_summary"]
     if vs:
         lines.append(f"Voice [{vs['detector']}]: {vs['fake_prob']:.0%} AI-generated (last 30 s), "
@@ -286,7 +331,8 @@ def render_text(state: dict) -> str:
 
 def main():
     ap = argparse.ArgumentParser(description="Listen to a call live and flag scams.")
-    ap.add_argument("--device", help="input device index or name (default: system default mic)")
+    ap.add_argument("--device", help="mic index, 'system' (default output) or 'system:<index>' "
+                                     "(a specific speaker/headset, see --list-devices)")
     ap.add_argument("--list-devices", action="store_true")
     ap.add_argument("--detector", help="aasist | aasist-l | wav2vec2 (default: VOICE_DETECTOR or aasist)")
     args = ap.parse_args()
@@ -297,11 +343,17 @@ def main():
         os.system("")  # enable colour codes in Windows terminals
 
     if args.list_devices:
+        print("Microphones (use --device <number>):")
         for i, name in input_devices():
-            print(f"{i:3d}  {name}")
+            print(f"  {i:3d}  {name}")
+        loops = loopback_devices()
+        if loops:
+            print("\nSystem audio: what a speaker/headset is playing (use --device system:<number>):")
+            for i, name in loops:
+                print(f"  system:{i:<4d} {name}")
         return
 
-    device = int(args.device) if args.device and args.device.isdigit() else args.device
+    device = parse_device(args.device)
     print("Loading models (first run downloads Whisper)...")
     detector = get_detector(args.detector)
     warm_up()

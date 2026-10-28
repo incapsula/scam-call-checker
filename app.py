@@ -61,16 +61,20 @@ def check_recording(path):
 
 # ---------- Live call ----------
 SYSTEM_CHOICE = "System audio: whatever this laptop is playing (Discord, YouTube, calls)"
+CHOICES = {"Default microphone": None}  # dropdown label -> device for LiveMonitor
 try:
-    from scamcheck.live import SYSTEM_AUDIO, LiveMonitor, input_devices
+    from scamcheck.live import SYSTEM_AUDIO, LiveMonitor, input_devices, level_line, loopback_devices
 
-    DEVICES = ["Default microphone"]
     if os.name == "nt":
-        DEVICES.append(SYSTEM_CHOICE)
-    DEVICES += [f"{i}: {name}" for i, name in input_devices()]
+        CHOICES[SYSTEM_CHOICE] = SYSTEM_AUDIO
+        for i, name in loopback_devices():  # each speaker/headset, e.g. the one Discord plays through
+            CHOICES[f"System audio: {name} (#{i})"] = f"{SYSTEM_AUDIO}:{i}"
+    for i, name in input_devices():
+        CHOICES[f"Mic {i}: {name}"] = i
     LIVE_ERROR = None
 except Exception as e:  # e.g. PortAudio missing
-    DEVICES, LIVE_ERROR = ["Default microphone"], f"Live mode unavailable: {e}"
+    LIVE_ERROR = f"Live mode unavailable: {e}"
+DEVICES = list(CHOICES)
 
 MONITOR = None
 
@@ -84,7 +88,8 @@ def live_view():
     body = render(s["verdict"], s["voice_summary"], s["error"])
     if not s["verdict"] and s["transcript"]:
         body = "_Waiting for Gemma's first verdict..._\n\n" + body
-    return f"**Status:** {s['status']}\n\n{body}", s["transcript"]
+    level = level_line(s)
+    return f"**Status:** {s['status']}" + (f"  \n`{level}`" if level else "") + f"\n\n{body}", s["transcript"]
 
 
 def log_state(s):
@@ -93,7 +98,8 @@ def log_state(s):
     v = f"{vs['fake_prob']:.0%} fake" if vs else "-"
     verdict = s["verdict"]["verdict"] if s["verdict"] else "-"
     raised = " (raised by safety rules)" if s["verdict"] and s["verdict"].get("escalation") else ""
-    print(f"[live] voice {v} | {len(s['transcript'].split())} words | verdict {verdict}{raised}"
+    level = f"level {s['level']:.3f}" if s.get("level") is not None else "no audio yet"
+    print(f"[live] {level} | voice {v} | {len(s['transcript'].split())} words | verdict {verdict}{raised}"
           + (f" | error: {s['error']}" if s["error"] else ""), flush=True)
 
 
@@ -105,12 +111,7 @@ def start_live(choice):
         return
     if MONITOR is not None:
         MONITOR.stop()
-    if choice == DEVICES[0]:
-        device = None
-    elif choice == SYSTEM_CHOICE:
-        device = SYSTEM_AUDIO
-    else:
-        device = int(choice.split(":", 1)[0])
+    device = CHOICES.get(choice)
     get_detector()
     warm_up()  # load models before audio starts piling up
     mon = LiveMonitor(device=device, on_update=log_state)
