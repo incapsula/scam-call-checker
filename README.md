@@ -1,7 +1,7 @@
 # Scam Call Checker
 
-Upload or record a phone call and find out whether it's a scam, and whether the voice
-is AI-generated. Everything runs locally on open models: nothing about the call leaves
+Listens to a phone call and warns you, live, if it's a scam and whether the voice is
+AI-generated. Everything runs locally on open models: nothing about the call leaves
 the laptop.
 
 Built at Hacktoberfest Hack Day Loughborough x DigiTech (28 Oct 2026), on top of
@@ -10,15 +10,17 @@ Built at Hacktoberfest Hack Day Loughborough x DigiTech (28 Oct 2026), on top of
 ## How it works
 
 ```
-call audio ──► AASIST ──────────────► fake-voice score ──┐
-          └──► Whisper ─► transcript ────────────────────┴──► Gemma 4 ──► verdict, quoted red flags, advice
+call audio ──► voice detector (AASIST) ───► fake-voice score ───┐
+(mic or        every 5 s                                        ├──► Gemma 4 ──► verdict, red flags, advice
+ loopback) ──► Whisper ──► running transcript ──────────────────┘    every 15 s
 ```
 
-1. **AASIST** (`scamcheck/voice.py`): pretrained anti-spoofing model scores each 4-second
-   window of the call for synthetic speech.
-2. **Whisper** (`scamcheck/transcribe.py`): turns the call into text.
-3. **Gemma 4 via Ollama** (`scamcheck/analyse.py`): reads both, follows the instructions in
-   `skills/scam-call-analyst/SKILL.md` (Agent Skills format), and returns structured JSON:
+1. **Listen** (`scamcheck/live.py`): captures audio from a mic or loopback device in 5 s chunks.
+2. **Voice check** (`scamcheck/detectors/`): AASIST scores each 4 s window for synthetic
+   speech. Detectors are pluggable: swap in a better model without touching anything else.
+3. **Transcribe** (`scamcheck/transcribe.py`): Whisper turns each chunk into text.
+4. **Judge** (`scamcheck/analyse.py`): Gemma 4 via Ollama reads the transcript + voice score,
+   following `skills/scam-call-analyst/SKILL.md` (Agent Skills format), and returns JSON:
    verdict, risk score, the exact phrases that are red flags, and what to do.
 
 ## Setup
@@ -36,26 +38,73 @@ Install [Ollama](https://ollama.com), then pull Gemma 4:
 
 ```bash
 ollama pull gemma4               # E4B, ~9.6 GB
-# weaker laptop or slow wifi:
-ollama pull gemma4:e2b           # ~7.2 GB, then set GEMMA_MODEL=gemma4:e2b
+ollama pull gemma4:e2b           # smaller (~7.2 GB); then set GEMMA_MODEL=gemma4:e2b
 ```
 
-Run the app from the repo root and open the URL it prints:
+**Event wifi tip:** only the demo laptop needs everything. Install just what your piece needs.
+
+## Run it
 
 ```bash
-python app.py
+python app.py                    # web UI: "Live call" tab + "Check a recording" tab
+python -m scamcheck.live         # same live check in the terminal
 ```
 
-The first run also downloads the Whisper weights. AASIST's weights are already in
-`models/weights/`.
+## Plugging it into a call
 
-**Event wifi tip:** only the demo laptop needs everything. If you're only working on
-one piece, install just what it needs (see the table below).
+| Setup | How | Notes |
+|---|---|---|
+| **Phone on speaker** (easiest, best for the demo) | Put the phone next to the laptop, use the default mic | Works with any phone and any call app |
+| **Call on the laptop** (WhatsApp desktop, Teams, Zoom, Discord) | Pick a loopback device that carries the laptop's sound output | Captures the caller's side, which is the side we're checking |
+| Real phone lines | Twilio Media Streams / SIP streaming audio to this code | Future work: needs a public server |
+
+Loopback devices:
+- **Windows:** Sound settings → More sound settings → Recording → right-click → *Show disabled
+  devices* → enable **Stereo Mix**. If it's not there, install VB-Cable.
+- **macOS:** install BlackHole (2ch). In Audio MIDI Setup create a *Multi-Output Device*
+  (speakers + BlackHole) and set it as output so you still hear the call, then listen on BlackHole.
+- **Linux:** pick the **"Monitor of …"** device.
+
+Find device numbers with `python -m scamcheck.live --list-devices`, then
+`python -m scamcheck.live --device <number>` (or pick it in the app's dropdown).
+
+## Swapping the voice detector
+
+```bash
+VOICE_DETECTOR=aasist     python app.py   # default
+VOICE_DETECTOR=aasist-l   python app.py   # smaller, faster AASIST
+VOICE_DETECTOR=wav2vec2   python app.py   # wav2vec2 model trained on modern TTS (needs requirements-extra.txt)
+```
+
+(Windows PowerShell: `$env:VOICE_DETECTOR="wav2vec2"; python app.py`)
+
+To add a new model: create `scamcheck/detectors/<name>.py` with a `Detector` subclass that
+implements `fake_probs(windows)`, then register it in `scamcheck/detectors/__init__.py`.
+
+## Datasets
+
+| Dataset | What's in it | Use it for |
+|---|---|---|
+| [garystafford/deepfake-audio-detection](https://huggingface.co/datasets/garystafford/deepfake-audio-detection) | 1,866 clips, balanced real/fake. Fakes from 6 modern TTS (ElevenLabs, Polly, Kokoro…). 16 kHz FLAC | **Start here.** Small, modern fakes |
+| [In-the-Wild](https://deepfake-demo.aisec.fraunhofer.de/in_the_wild) ([HF](https://huggingface.co/datasets/mueller91/In-The-Wild)) | ~38 h of real and deepfake audio of 58 public figures, Apache 2.0 | Real-world, noisier audio |
+| ASVspoof 2019 LA | What AASIST was trained on; several GB (`python download_dataset.py`) | Skip at the event |
+| [BothBosu/Scammer-Conversation](https://huggingface.co/datasets/BothBosu/Scammer-Conversation) | ~1k generated conversations (CSV) | Testing Gemma's scam reasoning on text |
+
+Get a small balanced subset and measure a detector on it:
+
+```bash
+pip install -r requirements-extra.txt
+python scripts/get_dataset.py garystafford/deepfake-audio-detection --per-class 100
+python scripts/evaluate_detector.py data/deepfake-audio-detection
+python scripts/evaluate_detector.py data/deepfake-audio-detection --detector wav2vec2
+```
+
+The evaluation prints accuracy and EER (lower is better): use those numbers in the pitch.
 
 ## Test each piece on its own
 
 ```bash
-python -m scamcheck.voice samples/*.wav          # AASIST scores per clip
+python -m scamcheck.voice samples/*.wav                    # voice scores per clip
 python -m scamcheck.transcribe samples/real_scam.wav
 python -m scamcheck.analyse "This is HMRC, you will be arrested unless you pay in gift cards"
 ```
@@ -64,12 +113,12 @@ python -m scamcheck.analyse "This is HMRC, you will be arrested unless you pay i
 
 Each person owns different files, so you won't get merge conflicts.
 
-| Task | Files | Needs installed | Owner |
-|---|---|---|---|
-| Voice detector: test AASIST on our clips, tune windows | `scamcheck/voice.py` | torch, librosa, soundfile | |
-| Demo clips: record real voices, generate TTS fakes | `samples/` | a mic + any TTS | |
-| Scam reasoning: tune the prompt, test edge cases | `skills/scam-call-analyst/SKILL.md` | Ollama + Gemma 4 | |
-| UI and demo: polish `app.py`, pitch, backup recording | `app.py` | everything | |
+| Task | Files | Owner |
+|---|---|---|
+| Live listening: get mic / loopback capture working on the demo laptop | `scamcheck/live.py` | |
+| Voice detector + dataset: evaluate AASIST vs wav2vec2, get numbers for the pitch | `scamcheck/detectors/`, `scripts/` | |
+| Scam reasoning: tune the prompt, test with the text dataset | `skills/scam-call-analyst/SKILL.md` | |
+| Demo clips, UI polish, pitch, backup recording | `samples/`, `app.py` | |
 
 ## Git workflow (keep it simple)
 
@@ -80,8 +129,6 @@ git commit -m "what you changed"
 git push
 ```
 
-Commit small and often. If a push is rejected, `git pull --rebase` and push again.
-
 ## Timeline
 
 - **15:45** feature freeze, only fixes after this
@@ -90,17 +137,16 @@ Commit small and often. If a push is rejected, `git pull --rebase` and push agai
 
 ## Known limitations
 
-- AASIST was trained on ASVspoof 2019 LA (clean audio, 2019-era TTS and voice
-  conversion). It can misjudge noisy phone or mic recordings and may miss modern voice
-  cloning. That's why the verdict is driven mainly by what is said, with the voice score
-  as an extra warning sign.
-- No live phone integration: the app works on recorded or uploaded clips.
+- AASIST was trained on ASVspoof 2019 LA (clean audio, 2019-era TTS and voice conversion). It
+  can misjudge noisy phone or mic audio and may miss modern voice cloning. That's why the
+  verdict is driven mainly by what is said, with the voice score as an extra warning sign.
+- Live mode processes 5 s chunks, so verdicts lag the call by ~5–20 s. If it falls behind,
+  switch Whisper to `base.en` in `scamcheck/transcribe.py`.
 
 ## Credits
 
 - **AASIST**: Jung et al., *AASIST: Audio Anti-Spoofing using Integrated Spectro-Temporal
   Graph Attention Networks* (2021). Code and pretrained weights © NAVER Corp., MIT licence
-  (see `LICENSE`, `NOTICE`). The original AASIST readme, including training instructions,
-  is in [`AASIST_README.md`](AASIST_README.md).
+  (see `LICENSE`, `NOTICE`). Original readme with training instructions: [`AASIST_README.md`](AASIST_README.md).
 - **Gemma 4**: Google, Apache 2.0.
 - **Whisper** via [faster-whisper](https://github.com/SYSTRAN/faster-whisper), MIT.

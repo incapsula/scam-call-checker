@@ -40,13 +40,16 @@ def _instructions() -> str:
     return re.sub(r"\A---\s*\n.*?\n---\s*\n", "", text, flags=re.S).strip()
 
 
-def analyse(transcript: str, voice: dict) -> dict:
+def analyse(transcript: str, voice: dict | None) -> dict:
     transcript = transcript.strip() or "(no speech detected)"
-    user = (
-        f"AI-voice detector (AASIST): {voice['fake_prob']:.0%} average probability of synthetic "
-        f"speech, {voice['max_fake_prob']:.0%} in the worst 4-second window.\n\n"
-        f'Transcript:\n"""{transcript}"""'
-    )
+    if voice:
+        voice_line = (
+            f"AI-voice detector ({voice.get('detector', 'AASIST')}): {voice['fake_prob']:.0%} average "
+            f"probability of synthetic speech, {voice['max_fake_prob']:.0%} in the worst window."
+        )
+    else:
+        voice_line = "AI-voice detector: unavailable, judge on the transcript only."
+    user = f'{voice_line}\n\nTranscript:\n"""{transcript}"""'
     resp = ollama.chat(
         model=GEMMA,
         messages=[

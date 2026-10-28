@@ -3,6 +3,9 @@ exp_result/
 depreciated/
 LA/
 
+# Downloaded evaluation datasets (each person downloads their own)
+data/
+
 # Local environment, editors, secrets
 .env
 .venv/

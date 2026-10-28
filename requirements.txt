@@ -3,9 +3,10 @@ torch>=2.1
 numpy
 soundfile
 librosa
-gradio>=4.0
+gradio>=5.0
 faster-whisper
 ollama>=0.4
+sounddevice   # live call listening (Linux also needs: sudo apt install libportaudio2)
 
 # Only needed to retrain AASIST with main.py, not for the app:
 # torchcontrib

@@ -1,0 +1,5 @@
+# Optional extras (not needed for the core app):
+# - scripts/get_dataset.py       -> datasets
+# - VOICE_DETECTOR=wav2vec2      -> transformers
+datasets
+transformers
