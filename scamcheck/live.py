@@ -3,6 +3,7 @@
     python -m scamcheck.live --list-devices      # find your mic / loopback device
     python -m scamcheck.live                     # default mic (e.g. phone on speaker next to laptop)
     python -m scamcheck.live --device 3          # a specific input (Stereo Mix, BlackHole, monitor...)
+    python -m scamcheck.live --device system     # Windows: whatever the laptop plays (Discord, YouTube...)
 
 Every CHUNK_S seconds: score the voice, transcribe the new speech.
 Every LLM_EVERY_S seconds (in the background): ask Gemma for an updated verdict.
@@ -30,8 +31,62 @@ SILENCE_RMS = 0.003  # chunks quieter than this are skipped
 RECENT = 6           # voice score = average of the last N chunks (~30 s)
 
 
+SYSTEM_AUDIO = "system"  # special device: whatever this computer is playing (Windows)
+
+
 def input_devices() -> list[tuple[int, str]]:
     return [(i, d["name"]) for i, d in enumerate(sd.query_devices()) if d["max_input_channels"] > 0]
+
+
+class SystemAudioCapture:
+    """Records what Windows is playing (Discord, YouTube, Phone Link calls) via WASAPI loopback.
+
+    Needs: pip install PyAudioWPatch   (Windows only)
+    Captures the *default output device*, so set the call app's output to "Default".
+    Note: Windows sends no audio here while nothing is playing.
+    """
+
+    def __init__(self, push):
+        try:
+            import pyaudiowpatch as pyaudio
+        except ImportError as e:
+            raise RuntimeError("System audio needs: pip install PyAudioWPatch (Windows only)") from e
+
+        self.p = pyaudio.PyAudio()
+        try:
+            dev = self.p.get_default_wasapi_loopback()
+        except Exception:
+            wasapi = self.p.get_host_api_info_by_type(pyaudio.paWASAPI)
+            speakers = self.p.get_device_info_by_index(wasapi["defaultOutputDevice"])
+            dev = next(
+                (d for d in self.p.get_loopback_device_info_generator() if speakers["name"] in d["name"]),
+                None,
+            )
+            if dev is None:
+                self.p.terminate()
+                raise RuntimeError(f"No loopback device found for {speakers['name']}")
+
+        self.name = dev["name"]
+        self.rate = int(dev["defaultSampleRate"])
+        channels = max(1, int(dev["maxInputChannels"]))
+
+        def callback(in_data, frame_count, time_info, status):
+            audio = np.frombuffer(in_data, dtype=np.float32).reshape(-1, channels).mean(axis=1)
+            push(audio.copy())
+            return (None, pyaudio.paContinue)
+
+        self.stream = self.p.open(
+            format=pyaudio.paFloat32, channels=channels, rate=self.rate, input=True,
+            input_device_index=dev["index"], frames_per_buffer=1024, stream_callback=callback,
+        )
+        self.stream.start_stream()
+
+    def close(self):
+        try:
+            self.stream.stop_stream()
+            self.stream.close()
+        finally:
+            self.p.terminate()
 
 
 class LiveMonitor:
@@ -54,25 +109,34 @@ class LiveMonitor:
 
     # --- audio capture -------------------------------------------------------------------
     def start(self):
-        info = sd.query_devices(self.device, "input")
-        self.rate = int(info["default_samplerate"])  # open at the device's own rate, resample later
-        channels = min(2, int(info["max_input_channels"]))
         self.state = self._fresh_state()
-        self.state.update(status=f"listening on: {info['name']}", started=time.time())
         self._stop.clear()
-        self._stream = sd.InputStream(
-            samplerate=self.rate, channels=channels, dtype="float32",
-            device=self.device, callback=self._callback,
-        )
-        self._stream.start()
+        if self.device == SYSTEM_AUDIO:
+            self._stream = SystemAudioCapture(self._q.put)
+            self.rate = self._stream.rate
+            name = f"system audio ({self._stream.name})"
+        else:
+            info = sd.query_devices(self.device, "input")
+            self.rate = int(info["default_samplerate"])  # open at the device's own rate, resample later
+            channels = min(2, int(info["max_input_channels"]))
+            self._stream = sd.InputStream(
+                samplerate=self.rate, channels=channels, dtype="float32",
+                device=self.device, callback=self._callback,
+            )
+            self._stream.start()
+            name = info["name"]
+        self.state.update(status=f"listening on: {name}", started=time.time())
         threading.Thread(target=self._run, daemon=True).start()
         self._emit()
 
     def stop(self):
         self._stop.set()
         if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
+            if isinstance(self._stream, SystemAudioCapture):
+                self._stream.close()
+            else:
+                self._stream.stop()
+                self._stream.close()
             self._stream = None
         self.state["status"] = "stopped"
         self._emit()

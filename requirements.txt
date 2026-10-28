@@ -7,6 +7,7 @@ gradio>=5.0
 faster-whisper
 ollama>=0.4
 sounddevice   # live call listening (Linux also needs: sudo apt install libportaudio2)
+PyAudioWPatch; sys_platform == "win32"   # "System audio" capture of calls/videos on Windows
 
 # Only needed to retrain AASIST with main.py, not for the app:
 # torchcontrib

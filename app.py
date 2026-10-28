@@ -52,10 +52,14 @@ def check_recording(path):
 
 
 # ---------- Live call ----------
+SYSTEM_CHOICE = "System audio: whatever this laptop is playing (Discord, YouTube, calls)"
 try:
-    from scamcheck.live import LiveMonitor, input_devices
+    from scamcheck.live import SYSTEM_AUDIO, LiveMonitor, input_devices
 
-    DEVICES = ["Default microphone"] + [f"{i}: {name}" for i, name in input_devices()]
+    DEVICES = ["Default microphone"]
+    if os.name == "nt":
+        DEVICES.append(SYSTEM_CHOICE)
+    DEVICES += [f"{i}: {name}" for i, name in input_devices()]
     LIVE_ERROR = None
 except Exception as e:  # e.g. PortAudio missing
     DEVICES, LIVE_ERROR = ["Default microphone"], f"Live mode unavailable: {e}"
@@ -92,12 +96,22 @@ def start_live(choice):
         return
     if MONITOR is not None:
         MONITOR.stop()
-    device = None if choice == DEVICES[0] else int(choice.split(":", 1)[0])
+    if choice == DEVICES[0]:
+        device = None
+    elif choice == SYSTEM_CHOICE:
+        device = SYSTEM_AUDIO
+    else:
+        device = int(choice.split(":", 1)[0])
     get_detector()
     warm_up()  # load models before audio starts piling up
     mon = LiveMonitor(device=device, on_update=log_state)
     MONITOR = mon
-    mon.start()
+    try:
+        mon.start()
+    except Exception as e:  # e.g. PyAudioWPatch missing, device busy
+        MONITOR = None
+        yield f"⚠️ Couldn't start listening: `{e}`", ""
+        return
     while MONITOR is mon and mon.state["status"] != "stopped":
         yield live_view()
         time.sleep(1)
