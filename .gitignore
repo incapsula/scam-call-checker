@@ -1,11 +1,16 @@
-# etc
-_*
-.*
+# AASIST training outputs and dataset (not needed for the app)
 exp_result/
-config/
-models/
 depreciated/
 LA/
+
+# Local environment, editors, secrets
+.env
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
+.gradio/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

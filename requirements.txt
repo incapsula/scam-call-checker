@@ -1,4 +1,12 @@
-torch>=1.6.0
-torchcontrib
+# Scam Call Checker app (Python 3.10–3.12 recommended)
+torch>=2.1
 numpy
 soundfile
+librosa
+gradio>=4.0
+faster-whisper
+ollama>=0.4
+
+# Only needed to retrain AASIST with main.py, not for the app:
+# torchcontrib
+# tensorboard
