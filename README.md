@@ -74,6 +74,22 @@ Loopback devices:
 Find device numbers with `python -m scamcheck.live --list-devices`, then
 `python -m scamcheck.live --device <number>` (or pick it in the app's dropdown).
 
+## Alert a loved one
+
+When a call is flagged (AI voice ≥ 80%, risk ≥ 80, or SCAM), the app can push an urgent
+notification to a family member's phone via [ntfy](https://ntfy.sh): free, no account.
+
+1. On their phone: install the **ntfy** app, tap **+**, subscribe to a hard-to-guess topic,
+   e.g. `scamcheck-velox-4821` (anyone who knows the name can read it).
+2. On the laptop, before starting the app:
+   ```powershell
+   $env:ALERT_NTFY_TOPIC="scamcheck-velox-4821"
+   python -m scamcheck.alerts      # sends a test notification
+   python app.py
+   ```
+
+Alerts are off unless `ALERT_NTFY_TOPIC` is set. Thresholds: `ALERT_AI_VOICE` (0.8), `ALERT_RISK` (80).
+
 ## Swapping the voice detector
 
 ```bash

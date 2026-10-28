@@ -284,8 +284,9 @@ def live_view():
     words = len(s["transcript"].split())
     where = s["status"].removeprefix("listening on: ")
     level = level_line(s)
+    meta = " · ".join(x for x in (where, level, f"📲 {s['alert']}" if s.get("alert") else "") if x)
     status = _status_row("live" if listening else "stopped", "Listening" if listening else "Stopped",
-                         _e(f"{where} · {level}" if level else where) if listening else _clock(s["started"]))
+                         _e(meta) if listening else _clock(s["started"]))
     note = (s["verdict"] or {}).get("voice_note", "")
     return (voice_panel(s["voice"], s["voice_summary"], "average, last 30 s", note),
             verdict_panel(s["verdict"], chip="Live call", chip_meta=f"{_clock(s['started'])} · {words} words",
@@ -301,6 +302,7 @@ def log_state(s):
     raised = " (raised by safety rules)" if s["verdict"] and s["verdict"].get("escalation") else ""
     level = f"level {s['level']:.3f}" if s.get("level") is not None else "no audio yet"
     print(f"[live] {level} | voice {v} | {len(s['transcript'].split())} words | verdict {verdict}{raised}"
+          + (f" | {s['alert']}" if s.get("alert") else "")
           + (f" | error: {s['error']}" if s["error"] else ""), flush=True)
 
 

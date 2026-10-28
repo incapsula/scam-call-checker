@@ -24,6 +24,7 @@ from .analyse import analyse
 from .detectors import get_detector
 from .rules import SEVERITY, apply_floor, find_cues
 from .transcribe import transcribe_array, warm_up
+from . import alerts
 
 SR = 16000
 CHUNK_S = float(os.getenv("LIVE_CHUNK_S", "3"))         # process new audio every 3 s
@@ -142,13 +143,16 @@ class LiveMonitor:
         self._q: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._llm_busy = threading.Lock()
+        self._alert_lock = threading.Lock()
+        self._alerts_sent: set[str] = set()
         self._stream = None
         self.state = self._fresh_state()
 
     @staticmethod
     def _fresh_state() -> dict:
         return {"status": "idle", "transcript": "", "voice": [], "voice_summary": None,
-                "verdict": None, "error": None, "started": None, "level": None, "chunks": 0}
+                "verdict": None, "error": None, "started": None, "level": None, "chunks": 0,
+                "alert": None}
 
     # --- audio capture -------------------------------------------------------------------
     def start(self):
@@ -281,9 +285,48 @@ class LiveMonitor:
 
     def _emit(self):
         try:
+            self._maybe_alert()
+        except Exception as e:
+            self.state["alert"] = f"Alert failed: {type(e).__name__}: {e}"
+        self._notify()
+
+    def _notify(self):
+        try:
             self.on_update(self.state)
         except Exception:
             pass
+
+    # --- loved-one alert (opt-in: set ALERT_NTFY_TOPIC) ------------------------------------
+    def _maybe_alert(self):
+        """Push a phone notification when the call looks dangerous. At most one per level
+        (AI voice, high risk, confirmed scam), so the phone isn't spammed every few seconds."""
+        if not alerts.enabled():
+            return
+        verdict, voice = self.state["verdict"], self.state["voice_summary"]
+        reason = alerts.alert_reason(verdict, voice, len(self.state["voice"]))
+        if not reason:
+            return
+        if verdict and verdict.get("verdict") == "SCAM":
+            key = "scam"
+        elif verdict and "risk" in reason:
+            key = "risk"
+        else:
+            key = "voice"
+        with self._alert_lock:
+            if key in self._alerts_sent or "scam" in self._alerts_sent:
+                return
+            self._alerts_sent.add(key)
+        message = alerts.build_message(reason, verdict)
+
+        def deliver():
+            try:
+                alerts.send(message)
+                self.state["alert"] = f"Alert sent to loved one: {reason}"
+            except Exception as e:
+                self.state["alert"] = f"Alert failed: {type(e).__name__}: {e}"
+            self._notify()
+
+        threading.Thread(target=deliver, daemon=True).start()
 
 
 # --- terminal view ---------------------------------------------------------------------------
@@ -306,6 +349,8 @@ def level_line(state: dict) -> str:
 
 def render_text(state: dict) -> str:
     lines = ["SCAM CALL CHECKER  (Ctrl+C to stop)", state["status"], level_line(state), ""]
+    if state.get("alert"):
+        lines.insert(3, f">>> {state['alert']}")
     vs = state["voice_summary"]
     if vs:
         lines.append(f"Voice [{vs['detector']}]: {vs['fake_prob']:.0%} AI-generated (last 30 s), "
