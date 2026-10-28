@@ -5,6 +5,7 @@ Tab 2 "Check a recording": record or upload a clip and analyse it in one go.
 """
 
 import os
+import time
 from pathlib import Path
 
 import gradio as gr
@@ -74,18 +75,33 @@ def live_view():
     return f"**Status:** {s['status']}\n\n{body}", s["transcript"]
 
 
+def log_state(s):
+    """Mirror live progress in the terminal, so you can see it's working even if the page lags."""
+    vs = s["voice_summary"]
+    v = f"{vs['fake_prob']:.0%} fake" if vs else "-"
+    verdict = s["verdict"]["verdict"] if s["verdict"] else "-"
+    print(f"[live] voice {v} | {len(s['transcript'].split())} words | verdict {verdict}"
+          + (f" | error: {s['error']}" if s["error"] else ""), flush=True)
+
+
 def start_live(choice):
+    """Generator: streams fresh state to the page every second until Stop is pressed."""
     global MONITOR
     if LIVE_ERROR:
-        return live_view()
+        yield live_view()
+        return
     if MONITOR is not None:
         MONITOR.stop()
     device = None if choice == DEVICES[0] else int(choice.split(":", 1)[0])
     get_detector()
     warm_up()  # load models before audio starts piling up
-    MONITOR = LiveMonitor(device=device)
-    MONITOR.start()
-    return live_view()
+    mon = LiveMonitor(device=device, on_update=log_state)
+    MONITOR = mon
+    mon.start()
+    while MONITOR is mon and mon.state["status"] != "stopped":
+        yield live_view()
+        time.sleep(1)
+    yield live_view()
 
 
 def stop_live():
@@ -111,9 +127,8 @@ with gr.Blocks(title="Scam Call Checker") as demo:
             stop_btn = gr.Button("Stop")
         live_md = gr.Markdown()
         live_tx = gr.Textbox(label="Live transcript", lines=6)
-        start_btn.click(start_live, device, [live_md, live_tx])
+        start_btn.click(start_live, device, [live_md, live_tx], show_progress="hidden")
         stop_btn.click(stop_live, None, [live_md, live_tx])
-        gr.Timer(1.0).tick(live_view, None, [live_md, live_tx], show_progress="hidden")
 
     with gr.Tab("Check a recording"):
         audio = gr.Audio(sources=["microphone", "upload"], type="filepath", label="Call audio")
