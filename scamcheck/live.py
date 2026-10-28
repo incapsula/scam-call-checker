@@ -38,7 +38,19 @@ SYSTEM_AUDIO = "system"  # special device: whatever this computer is playing (Wi
 
 
 def input_devices() -> list[tuple[int, str]]:
-    return [(i, d["name"]) for i, d in enumerate(sd.query_devices()) if d["max_input_channels"] > 0]
+    """Input devices you can actually record from (Windows WDM-KS endpoints are skipped: they
+    often fail with 'Failed to read capture position register')."""
+    apis = sd.query_hostapis()
+    out = []
+    for i, d in enumerate(sd.query_devices()):
+        if d["max_input_channels"] <= 0:
+            continue
+        h = d.get("hostapi")
+        api = apis[h]["name"] if isinstance(h, int) and 0 <= h < len(apis) else ""
+        if "WDM-KS" in api:
+            continue
+        out.append((i, d["name"]))
+    return out
 
 
 class SystemAudioCapture:
