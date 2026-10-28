@@ -50,15 +50,22 @@ def analyse(transcript: str, voice: dict | None) -> dict:
     else:
         voice_line = "AI-voice detector: unavailable, judge on the transcript only."
     user = f'{voice_line}\n\nTranscript:\n"""{transcript}"""'
-    resp = ollama.chat(
+    kwargs = dict(
         model=GEMMA,
         messages=[
             {"role": "system", "content": _instructions()},
             {"role": "user", "content": user},
         ],
         format=SCHEMA,
-        options={"temperature": 0},
+        options={"temperature": 0, "num_predict": 800},  # cap output length so calls stay quick
+        keep_alive="30m",  # keep Gemma in memory between checks (no reload lag mid-demo)
     )
+    try:
+        resp = ollama.chat(think=False, **kwargs)  # skip the thinking step: much faster on a laptop
+    except Exception as e:
+        if "think" not in str(e).lower():
+            raise
+        resp = ollama.chat(**kwargs)  # model/Ollama version without a thinking switch
     return json.loads(resp["message"]["content"])
 
 
@@ -66,5 +73,11 @@ if __name__ == "__main__":
     # Quick prompt test without audio:  python -m scamcheck.analyse "transcript text here"
     import sys
 
+    import time
+
     text = " ".join(sys.argv[1:]) or "Hi, this is HMRC. You owe unpaid tax and will be arrested today unless you pay in gift cards."
-    print(json.dumps(analyse(text, {"fake_prob": 0.5, "max_fake_prob": 0.5}), indent=2))
+    print(f"Asking {GEMMA}... (the first call loads the model into memory, can take a minute)", flush=True)
+    t = time.time()
+    result = analyse(text, {"fake_prob": 0.5, "max_fake_prob": 0.5})
+    print(json.dumps(result, indent=2))
+    print(f"took {time.time() - t:.1f}s")
