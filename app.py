@@ -28,7 +28,8 @@ def render(verdict: dict | None, voice: dict | None, error: str | None = None) -
         v = verdict.get("verdict", "?")
         parts.append(f"## {ICON.get(v, '')} {v} — risk {verdict.get('risk_score', '?')}/100")
         if verdict.get("escalation"):
-            parts.append(f"🛡️ **{verdict['escalation']}** (Gemma alone said {verdict.get('escalated_from')})")
+            said = verdict.get("escalated_from")
+            parts.append(f"🛡️ **{verdict['escalation']}**" + (f" (Gemma alone said {said})" if said else ""))
         if verdict.get("llm_error"):
             parts.append(f"⚠️ Gemma unavailable, so this verdict is from the safety rules only. {GEMMA_HINT}\n\n"
                          f"`{verdict['llm_error']}`")
@@ -125,7 +126,7 @@ def start_live(choice):
             yield live_view()
         except Exception as e:  # a display glitch shouldn't kill the live stream
             yield f"⚠️ Display error: `{type(e).__name__}: {e}` (still listening)", mon.state["transcript"]
-        time.sleep(1)
+        time.sleep(0.5)
     yield live_view()
 
 

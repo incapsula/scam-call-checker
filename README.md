@@ -148,8 +148,10 @@ git push
 - AASIST was trained on ASVspoof 2019 LA (clean audio, 2019-era TTS and voice conversion). It
   can misjudge noisy phone or mic audio and may miss modern voice cloning. That's why the
   verdict is driven mainly by what is said, with the voice score as an extra warning sign.
-- Live mode processes 5 s chunks, so verdicts lag the call by ~5–20 s. If it falls behind,
-  switch Whisper to `base.en` in `scamcheck/transcribe.py`.
+- Live mode processes 3 s chunks: the instant safety-rule verdict appears ~3–5 s after a scam
+  line is spoken, and Gemma's fuller verdict a couple of seconds later. If it falls behind on a
+  slower laptop, use the smaller Whisper (`$env:WHISPER_SIZE="base.en"`) or longer chunks
+  (`$env:LIVE_CHUNK_S="5"`).
 
 ## Credits
 

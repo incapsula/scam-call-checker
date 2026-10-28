@@ -22,13 +22,16 @@ import sounddevice as sd
 
 from .analyse import analyse
 from .detectors import get_detector
+from .rules import SEVERITY, apply_floor, find_cues
 from .transcribe import transcribe_array, warm_up
 
 SR = 16000
-CHUNK_S = 5          # process audio in 5 s chunks
-LLM_EVERY_S = 15     # ask Gemma at most this often
+CHUNK_S = float(os.getenv("LIVE_CHUNK_S", "3"))         # process new audio every 3 s
+LLM_EVERY_S = float(os.getenv("LIVE_LLM_EVERY_S", "3"))  # ask Gemma at most this often (only if new words)
+VOICE_CONTEXT_S = 5  # the voice check looks at the last 5 s, so short chunks don't hurt accuracy
 SILENCE_RMS = 0.003  # chunks quieter than this are skipped
-RECENT = 6           # voice score = average of the last N chunks (~30 s)
+RECENT = 8           # voice score = average of the last N checks (~25 s)
+_EMPTY_VERDICT = {"verdict": "LIKELY SAFE", "risk_score": 0, "red_flags": [], "voice_note": "", "advice": ""}
 
 
 SYSTEM_AUDIO = "system"  # special device: whatever this computer is playing (Windows)
@@ -147,8 +150,10 @@ class LiveMonitor:
     # --- processing ----------------------------------------------------------------------
     def _run(self):
         buf = np.zeros(0, dtype=np.float32)
-        need = CHUNK_S * self.rate
+        tail = np.zeros(0, dtype=np.float32)  # last VOICE_CONTEXT_S seconds of speech, at 16 kHz
+        need = int(CHUNK_S * self.rate)
         last_llm = 0.0
+        self._llm_text = ""
         while not self._stop.is_set():
             try:
                 buf = np.concatenate([buf, self._q.get(timeout=0.5)])
@@ -158,12 +163,14 @@ class LiveMonitor:
                 continue
             chunk, buf = buf[:need], buf[need:]
             audio = chunk if self.rate == SR else librosa.resample(chunk, orig_sr=self.rate, target_sr=SR)
+            audio = np.asarray(audio, dtype=np.float32)
             if float(np.sqrt(np.mean(audio ** 2))) < SILENCE_RMS:
                 continue  # silence: nothing to score or transcribe
+            tail = np.concatenate([tail, audio])[-int(VOICE_CONTEXT_S * SR):]
 
             # Voice and transcript are independent: one failing shouldn't stop the other.
             try:
-                v = self.detector.score(audio)
+                v = self.detector.score(tail)
                 self.state["voice"].append(v["fake_prob"])
                 recent = self.state["voice"][-RECENT:]
                 self.state["voice_summary"] = {
@@ -174,22 +181,55 @@ class LiveMonitor:
             except Exception as e:
                 self.state["error"] = f"Voice detector: {type(e).__name__}: {e}"
             try:
-                text = transcribe_array(audio, prompt=self.state["transcript"][-200:])
+                text = transcribe_array(audio, prompt=self.state["transcript"][-200:], fast=True)
                 if text:
                     self.state["transcript"] = f"{self.state['transcript']} {text}".strip()
             except Exception as e:
                 self.state["error"] = f"Whisper: {type(e).__name__}: {e}"
+            self._instant_verdict()
             self._emit()
 
-            if (self.state["transcript"] and time.time() - last_llm >= LLM_EVERY_S
-                    and not self._llm_busy.locked()):
+            if (self.state["transcript"] and self.state["transcript"] != self._llm_text
+                    and time.time() - last_llm >= LLM_EVERY_S and not self._llm_busy.locked()):
                 last_llm = time.time()
                 threading.Thread(target=self._check_llm, daemon=True).start()
 
+    def _instant_verdict(self):
+        """Show the safety rules' verdict straight away (no AI needed); Gemma's fuller answer follows.
+
+        Uses the same floor Gemma's answer is held to, so the verdict never flickers back down.
+        """
+        if not self.state["transcript"] and not self.state["voice_summary"]:
+            return
+        try:
+            fv = apply_floor(dict(_EMPTY_VERDICT), self.state["voice_summary"],
+                             find_cues(self.state["transcript"]))
+        except Exception:
+            return
+        current = self.state["verdict"]
+        if fv["verdict"] == "LIKELY SAFE" or (
+                current and SEVERITY.get(current.get("verdict"), 0) >= SEVERITY[fv["verdict"]]):
+            return
+        fv.pop("escalated_from", None)
+        fv["escalation"] = (fv.get("escalation", "").replace("Raised by safety rules", "Instant safety check")
+                            + " Gemma's full analysis follows.")
+        fv["source"] = "rules (instant)"
+        self.state["verdict"] = fv
+
     def _check_llm(self):
         with self._llm_busy:
+            transcript, voice = self.state["transcript"], self.state["voice_summary"]
+            self._llm_text = transcript
             try:
-                self.state["verdict"] = analyse(self.state["transcript"], self.state["voice_summary"])
+                result = analyse(transcript, voice)
+                if self.state["transcript"] != transcript:
+                    # Gemma judged an older snapshot: hold it to the rules for the latest words,
+                    # so it can't pull an instant SCAM flag back down.
+                    said = result.get("escalated_from")
+                    result = apply_floor(result, self.state["voice_summary"], find_cues(self.state["transcript"]))
+                    if said:
+                        result["escalated_from"] = said
+                self.state["verdict"] = result
                 self.state["error"] = None
             except Exception as e:
                 self.state["error"] = f"Gemma: {type(e).__name__}: {e}"
@@ -217,7 +257,8 @@ def render_text(state: dict) -> str:
     if r:
         lines += ["", f"{COLOUR.get(r['verdict'], '')} {r['verdict']}  risk {r.get('risk_score', '?')}/100 {RESET}"]
         if r.get("escalation"):
-            lines.append(f"  {r['escalation']} (Gemma alone said {r.get('escalated_from')})")
+            said = r.get("escalated_from")
+            lines.append(f"  {r['escalation']}" + (f" (Gemma alone said {said})" if said else ""))
         if r.get("llm_error"):
             lines.append(f"  [Gemma unavailable, safety rules only: {r['llm_error']}]")
         lines += [f'  ! "{f.get("quote", "")}" - {f.get("why", "")}' for f in r.get("red_flags", [])]
